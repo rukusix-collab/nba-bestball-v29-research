@@ -1,0 +1,47 @@
+name: NBA V2.9 R9-S19L bulk original-source acquisition
+
+# Explicitly manual: adding this file does not start any downloads.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nba-v29-r9-s19l-bulk
+  cancel-in-progress: false
+
+jobs:
+  capture-original-responses:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        start: [126, 226, 326, 426, 526, 626, 726, 826, 926, 1026, 1126, 1226, 1326, 1426, 1526, 1626, 1726, 1826, 1926, 2026, 2126, 2226, 2326, 2426]
+    steps:
+      - name: Check out source-custody scripts
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Run source-custody unit tests
+        run: python -m unittest -q test_source_gates test_batch_capture
+      - name: Capture bounded batch of original NBA responses
+        run: |
+          python batch_capture.py \
+            --mode batch \
+            --start-index "${{ matrix.start }}" \
+            --count 100 \
+            --delay 1.0 \
+            --out capture/
+      - name: Preserve response bodies, headers, checksums and failure logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nba-v29-s19l-start-${{ matrix.start }}-run-${{ github.run_id }}
+          path: capture/
+          if-no-files-found: error
+          retention-days: 30
