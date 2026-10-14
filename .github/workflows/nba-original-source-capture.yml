@@ -1,0 +1,55 @@
+
+name: NBA V2.9 R9-S19A direct source capture
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Run smoke before batches"
+        type: choice
+        options:
+          - smoke
+          - batch
+        default: smoke
+      start_index:
+        description: "Batch start index"
+        type: string
+        default: "0"
+      count:
+        description: "Batch size, maximum 100"
+        type: string
+        default: "25"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nba-v29-s19a-capture
+  cancel-in-progress: false
+
+jobs:
+  source-custody:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Run admission tests
+        run: python -m unittest -q test_source_gates test_batch_capture
+      - name: Capture original NBA responses
+        run: |
+          python batch_capture.py \
+            --mode "${{ inputs.mode }}" \
+            --start-index "${{ inputs.start_index }}" \
+            --count "${{ inputs.count }}" \
+            --delay 1.0 --out capture/
+      - name: Preserve receipts and failure logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nba-s19a-${{ github.run_id }}-${{ github.run_attempt }}
+          path: capture/
+          if-no-files-found: warn
+          retention-days: 30
