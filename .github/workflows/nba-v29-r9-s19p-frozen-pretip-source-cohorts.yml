@@ -1,0 +1,88 @@
+name: NBA V2.9 R9-S19P frozen pretip-source cohort acquisition
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: nba-v29-r9-s19p-historical-pdf-source
+  cancel-in-progress: false
+jobs:
+  capture-pdf-cohorts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - cohort: 2024_dev
+            dates: "2024-10-23,2024-10-25,2024-10-27,2024-10-30,2024-11-04,2024-11-11,2024-11-18,2024-11-25,2024-12-04,2024-12-10,2024-12-19,2024-12-27,2025-01-04,2025-01-11,2025-01-19,2025-01-27,2025-02-03,2025-02-09,2025-02-19,2025-02-25,2025-03-04,2025-03-11,2025-03-19,2025-03-27,2025-04-02,2025-04-05,2025-04-08,2025-04-10"
+          - cohort: 2025_chrono_holdout
+            dates: "2025-10-22,2025-10-25,2025-10-27,2025-10-29,2025-11-04,2025-11-11,2025-11-18,2025-11-25,2025-12-04,2025-12-11,2025-12-19,2025-12-27,2026-01-04,2026-01-11,2026-01-19,2026-01-27,2026-02-03,2026-02-08,2026-02-20,2026-02-25,2026-03-04,2026-03-11,2026-03-19,2026-03-27,2026-04-02,2026-04-05,2026-04-07,2026-04-09"
+          - cohort: roster_boundary
+            dates: "2024-12-23,2025-01-08,2025-02-07,2025-02-08,2025-02-28,2025-03-02,2025-03-30,2025-04-03,2026-02-04,2026-02-22,2026-03-01"
+    env:
+      SOURCE_DATES: ${{ matrix.dates }}
+      SOURCE_COHORT: ${{ matrix.cohort }}
+    steps:
+      - name: Python runtime
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Capture original publisher PDF bytes and HTTP receipts
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os, json, hashlib, urllib.request, urllib.parse, urllib.error, datetime, pathlib, time, sys
+          cohort=os.environ['SOURCE_COHORT']
+          dates=os.environ['SOURCE_DATES'].split(',')
+          vintages=['01PM','04PM','06PM']
+          expected=len(dates)*len(vintages)
+          out=pathlib.Path('capture')/cohort
+          out.mkdir(parents=True,exist_ok=True)
+          original_host='ak-static.cms.nba.com'
+          def now(): return datetime.datetime.now(datetime.timezone.utc).isoformat()
+          records=[]; failures_in_row=0
+          for day in dates:
+            for version in vintages:
+              filename=f'Injury-Report_{day}_{version}.pdf'
+              source=f'https://{original_host}/referee/injury/{filename}'
+              started=now()
+              try:
+                req=urllib.request.Request(source,headers={'Accept':'application/pdf','User-Agent':'NBA-V29-S19P-Research-Custody/1.0'})
+                with urllib.request.urlopen(req,timeout=45) as resp:
+                  status=resp.status
+                  final=resp.geturl()
+                  headers=list(resp.headers.items())
+                  body=resp.read()
+                if status!=200: raise ValueError(f'HTTP status {status}')
+                if urllib.parse.urlparse(final).hostname!=original_host: raise ValueError('Origin hostname changed on redirect')
+                if not body.startswith(b'%PDF-') or not b'%%EOF' in body[-2048:] or len(body)<1000:raise ValueError('Invalid PDF bytes')
+                hdict={key.lower():v for key,v in headers}
+                if 'content-length' in hdict and int(hdict['content-length'])!=len(body): raise ValueError('Content-Length mismatch')
+                output=out/filename
+                with output.open('xb') as fh:fh.write(body)
+                receipt={'source':source,'final_url':final,'http_status':status,'headers':headers,'body_sha256':hashlib.sha256(body).hexdigest(),'body_bytes':len(body),'request_started_utc':started,'response_completed_utc':now(),'source_publisher_original_bytes':True,'independently_witnessed_at_historical_pretip':False,'report_printed_vintage_verified':False,'as_of_model_eligible':False,'season_cohort':cohort}
+                (out/(filename+'.receipt.json')).write_text(json.dumps(receipt,indent=2,sort_keys=True))
+                records.append({'filename':filename,'status':'LOCAL_ORIGINAL_BYTES','sha256':receipt['body_sha256']})
+                failures_in_row=0
+              except Exception as exc:
+                records.append({'filename':filename,'status':'FAILED','error':f'{type(exc).__name__}: {exc}','at':now()})
+                failures_in_row+=1
+              time.sleep(2.0)
+              if failures_in_row>=5:break
+            if failures_in_row>=5:break
+          counts={v:sum(r['status']==v for r in records) for v in ('LOCAL_ORIGINAL_BYTES','FAILED')}
+          summary={'cohort':cohort,'expected':expected,'checked':len(records),'counts':counts,'records':records,'retrospective_original_receipts_only':True,'independent_pretip_witnessed':False,'training_admitted':False}
+          (out/'CAPTURE_SUMMARY.json').write_text(json.dumps(summary,indent=2))
+          print(json.dumps({'cohort':cohort,'expected':expected,'checked':len(records),'counts':counts},indent=2))
+          sys.exit(0 if counts['LOCAL_ORIGINAL_BYTES']==expected else 1)
+          PY
+      - name: Preserve originals and failed acquisition evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nba-s19p-${{ matrix.cohort }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: capture/
+          if-no-files-found: warn
+          retention-days: 30
