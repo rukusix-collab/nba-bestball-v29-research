@@ -1,0 +1,99 @@
+name: NBA V2.9 R9-S19Q corrected remaining 60 original injury PDFs
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: nba-v29-r9-s19q-fixed-60
+  cancel-in-progress: false
+jobs:
+  capture-pdf-correction:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - cohort: 2025_chrono_holdout
+            dates: "2025-12-27,2026-01-04,2026-01-11,2026-01-19,2026-01-27,2026-02-03,2026-02-08,2026-02-20,2026-02-25,2026-03-04,2026-03-11,2026-03-19,2026-03-27,2026-04-02,2026-04-05,2026-04-07,2026-04-09"
+          - cohort: roster_boundary
+            dates: "2026-02-04,2026-02-22,2026-03-01"
+    env:
+      SOURCE_COHORT: ${{ matrix.cohort }}
+      SOURCE_DATES: ${{ matrix.dates }}
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Capture 60 remaining correct-filename NBA PDFs and source receipts
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os, json, hashlib, urllib.request, urllib.parse, urllib.error, datetime, pathlib, time, sys
+          cohort=os.environ['SOURCE_COHORT']
+          dates=os.environ['SOURCE_DATES'].split(',')
+          vintages=('01_30PM','04_30PM','06_30PM')
+          expected=len(dates)*3
+          host='ak-static.cms.nba.com'
+          out=pathlib.Path('capture')/cohort
+          out.mkdir(parents=True,exist_ok=True)
+          def now(): return datetime.datetime.now(datetime.timezone.utc).isoformat()
+          rows=[]
+          for day in dates:
+           for vintage in vintages:
+            filename=f'Injury-Report_{day}_{vintage}.pdf'
+            url=f'https://{host}/referee/injury/{filename}'
+            saved=False
+            for attempt in range(1,4):
+             start=now()
+             try:
+              req=urllib.request.Request(url,headers={'Accept':'application/pdf','User-Agent':'NBA-V29-S19Q-Research-Custody/1.0'})
+              with urllib.request.urlopen(req,timeout=45) as resp:
+               status=resp.status
+               final=resp.geturl()
+               headers=list(resp.headers.items())
+               raw=resp.read()
+              if status!=200: raise ValueError(f'HTTP {status}')
+              if urllib.parse.urlparse(final).hostname!=host: raise ValueError('Publisher host changed')
+              if len(raw)<1000 or not raw.startswith(b'%PDF-') or b'%%EOF' not in raw[-2048:]:
+               raise ValueError('PDF original byte structural gate failed')
+              hdr={k.lower():v for k,v in headers}
+              if hdr.get('content-length') and int(hdr['content-length'])!=len(raw):
+               raise ValueError('Content-Length mismatch')
+              with (out/filename).open('xb') as f: f.write(raw)
+              receipt={'filename':filename,'source_url':url,'final_url':final,
+                       'http_status':status,'response_headers':headers,
+                       'body_sha256':hashlib.sha256(raw).hexdigest(),'body_byte_count':len(raw),
+                       'request_start_utc':start,'response_complete_utc':now(),
+                       'source_publisher_original_bytes_direct_get':True,
+                       'independently_witnessed_historical_pretip':False,
+                       'official_printed_vintage_checked':False,'training_admitted':False,
+                       'cohort':cohort,'attempts':attempt}
+              (out/(filename+'.receipt.json')).write_text(json.dumps(receipt,sort_keys=True,indent=2))
+              rows.append({'filename':filename,'status':'LOCAL_ORIGINAL_BYTES','sha256':receipt['body_sha256'],'byte_count':len(raw),'attempts':attempt})
+              saved=True
+              break
+             except Exception as e:
+              err=f'{type(e).__name__}: {e}'
+              if attempt<3: time.sleep(3*attempt)
+            if not saved:
+             rows.append({'filename':filename,'status':'FAILED','error':err,'attempts':3})
+            time.sleep(1.7)
+          summary={'cohort':cohort,'expected':expected,'checked':len(rows),
+                   'success':sum(r['status']=='LOCAL_ORIGINAL_BYTES' for r in rows),
+                   'failed':sum(r['status']=='FAILED' for r in rows),
+                   'records':rows,'predeclared_dates_preserved':True,
+                   'retrospective_custody_only':True,'training_admitted':False}
+          (out/'CAPTURE_SUMMARY.json').write_text(json.dumps(summary,indent=2,sort_keys=True))
+          print(json.dumps({k:v for k,v in summary.items() if k!='records'},indent=2))
+          sys.exit(0 if summary['success']==expected else 1)
+          PY
+      - name: Preserve original PDFs and even failed-source receipt summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nba-v29-s19q-${{ matrix.cohort }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: capture/
+          if-no-files-found: warn
+          retention-days: 30
